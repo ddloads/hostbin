@@ -1,0 +1,16 @@
+services:
+  hostbin:
+    build: .
+    container_name: hostbin
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      APP_NAME: Hostbin
+      BASE_URL: http://localhost:8080
+      MAX_PASTE_BYTES: 1048576
+    volumes:
+      - hostbin-data:/data
+
+volumes:
+  hostbin-data:
