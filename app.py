@@ -198,16 +198,7 @@ def layout(title, content, flash=None, user=None):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{safe_title}</title>
-  <script>
-    (function () {{
-      try {{
-        var savedTheme = localStorage.getItem("hostbin-theme");
-        if (savedTheme === "dark" || savedTheme === "light") {{
-          document.documentElement.setAttribute("data-theme", savedTheme);
-        }}
-      }} catch (error) {{}}
-    }})();
-  </script>
+  <script src="/static/app.js"></script>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -224,33 +215,44 @@ def layout(title, content, flash=None, user=None):
     {flash_html}
     {content}
   </main>
-  <script>
-    (function () {{
-      var root = document.documentElement;
-      var toggle = document.getElementById("theme-toggle");
-      if (!toggle) return;
-
-      function currentTheme() {{
-        return root.getAttribute("data-theme") === "dark" ? "dark" : "light";
-      }}
-
-      function setTheme(theme) {{
-        root.setAttribute("data-theme", theme);
-        toggle.textContent = theme === "dark" ? "Light" : "Dark";
-        toggle.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
-        try {{
-          localStorage.setItem("hostbin-theme", theme);
-        }} catch (error) {{}}
-      }}
-
-      setTheme(currentTheme());
-      toggle.addEventListener("click", function () {{
-        setTheme(currentTheme() === "dark" ? "light" : "dark");
-      }});
-    }})();
-  </script>
 </body>
 </html>"""
+
+
+def js():
+    return """(function () {
+  try {
+    var savedTheme = localStorage.getItem("hostbin-theme");
+    if (savedTheme === "dark" || savedTheme === "light") {
+      document.documentElement.setAttribute("data-theme", savedTheme);
+    }
+  } catch (e) {}
+})();
+
+document.addEventListener("DOMContentLoaded", function () {
+  var root = document.documentElement;
+  var toggle = document.getElementById("theme-toggle");
+  if (!toggle) return;
+
+  function currentTheme() {
+    return root.getAttribute("data-theme") === "dark" ? "dark" : "light";
+  }
+
+  function setTheme(theme) {
+    root.setAttribute("data-theme", theme);
+    toggle.textContent = theme === "dark" ? "Light" : "Dark";
+    toggle.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+    try {
+      localStorage.setItem("hostbin-theme", theme);
+    } catch (e) {}
+  }
+
+  setTheme(currentTheme());
+  toggle.addEventListener("click", function () {
+    setTheme(currentTheme() === "dark" ? "light" : "dark");
+  });
+});
+"""
 
 
 def css():
@@ -476,7 +478,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path == "/static/app.css":
+        if path == "/static/app.js":
+            self.send_text(js(), "application/javascript; charset=utf-8")
+        elif path == "/static/app.css":
             self.send_text(css(), "text/css; charset=utf-8")
         elif path == "/":
             self.home()
