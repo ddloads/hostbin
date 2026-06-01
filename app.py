@@ -28,7 +28,7 @@ PORT = int(os.getenv("PORT", "8080"))
 COOKIE_NAME = "hostbin_flash"
 SESSION_COOKIE_NAME = "hostbin_session"
 SESSION_TTL = 30 * 24 * 60 * 60
-ASSET_VERSION = "2026-06-01-3"
+ASSET_VERSION = "2026-06-01-4"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
@@ -565,6 +565,15 @@ document.addEventListener("DOMContentLoaded", function () {
           button.textContent = original;
         }, 1800);
       });
+    });
+  });
+
+  document.querySelectorAll("[data-clear-paste]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var target = document.querySelector(button.getAttribute("data-clear-paste"));
+      if (!target) return;
+      target.value = "";
+      target.focus();
     });
   });
 });
@@ -1287,6 +1296,11 @@ class Handler(BaseHTTPRequestHandler):
         )
         error_html = f'<div class="flash error">{escape(error)}</div>' if error else ""
         show_password = action == "/create"
+        clear_button = (
+            '<button class="button secondary" type="button" data-clear-paste="#paste-body">Clear</button>'
+            if not show_password
+            else ""
+        )
         password_html = (
             """
     <label>Password
@@ -1311,7 +1325,7 @@ class Handler(BaseHTTPRequestHandler):
 {error_html}
 <form method="post" action="{escape(action)}" enctype="multipart/form-data">
   <label>Paste content
-    <textarea name="body" maxlength="{MAX_PASTE_BYTES}">{escape(values.get("body", ""))}</textarea>
+    <textarea id="paste-body" name="body" maxlength="{MAX_PASTE_BYTES}">{escape(values.get("body", ""))}</textarea>
     <span class="hint">Maximum size: {MAX_PASTE_BYTES:,} bytes.</span>
   </label>
   <label>Create from file
@@ -1347,6 +1361,7 @@ class Handler(BaseHTTPRequestHandler):
   </div>
   <div class="actions">
     <button type="submit">{escape(button)}</button>
+    {clear_button}
   </div>
 </form>
 """
