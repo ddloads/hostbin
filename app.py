@@ -28,7 +28,7 @@ PORT = int(os.getenv("PORT", "8080"))
 COOKIE_NAME = "hostbin_flash"
 SESSION_COOKIE_NAME = "hostbin_session"
 SESSION_TTL = 30 * 24 * 60 * 60
-ASSET_VERSION = "2026-06-01-2"
+ASSET_VERSION = "2026-06-01-3"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
@@ -449,6 +449,10 @@ def absolute(path):
     return f"{BASE_URL}{path}" if BASE_URL else path
 
 
+def raw_url(paste_id):
+    return absolute(f"/raw/{quote(paste_id)}")
+
+
 def google_enabled():
     return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
@@ -519,6 +523,49 @@ document.addEventListener("DOMContentLoaded", function () {
   setTheme(currentTheme());
   toggle.addEventListener("click", function () {
     setTheme(currentTheme() === "dark" ? "light" : "dark");
+  });
+
+  function copyText(value) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(value);
+    }
+    return new Promise(function (resolve, reject) {
+      var textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand("copy") ? resolve() : reject(new Error("copy failed"));
+      } catch (error) {
+        reject(error);
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    });
+  }
+
+  document.querySelectorAll("[data-copy-url]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var value = button.getAttribute("data-copy-url");
+      if (value.charAt(0) === "/") {
+        value = window.location.origin + value;
+      }
+      var original = button.textContent;
+      copyText(value).then(function () {
+        button.textContent = "Copied";
+        setTimeout(function () {
+          button.textContent = original;
+        }, 1400);
+      }).catch(function () {
+        button.textContent = "Copy failed";
+        setTimeout(function () {
+          button.textContent = original;
+        }, 1800);
+      });
+    });
   });
 });
 """
@@ -1490,6 +1537,7 @@ class Handler(BaseHTTPRequestHandler):
         folder_meta = f'<span>folder: {escape(folder)}</span>' if folder else ""
         body = highlight_code(paste["body"], paste["language"])
         raw_path = f"/raw/{quote(paste_id)}"
+        copy_raw_url = escape(raw_url(paste_id))
         download_path = f"/download/{quote(paste_id)}"
         content = f"""
 <section class="paste-head">
@@ -1507,6 +1555,7 @@ class Handler(BaseHTTPRequestHandler):
   </div>
   <div class="actions">
     <a class="button secondary" href="{raw_path}">Raw</a>
+    <button class="button secondary" type="button" data-copy-url="{copy_raw_url}">Copy raw URL</button>
     <a class="button secondary" href="{download_path}">Download</a>
     <a class="button secondary" href="/new">New</a>
     {edit_link}
@@ -1600,6 +1649,7 @@ class Handler(BaseHTTPRequestHandler):
   </div>
   <div class="actions">
     <a class="button secondary" href="/raw/{quote(row["id"])}">Raw</a>
+    <button class="button secondary" type="button" data-copy-url="{escape(raw_url(row["id"]))}">Copy raw URL</button>
     <a class="button secondary" href="/download/{quote(row["id"])}">Download</a>
   </div>
 </article>"""
@@ -1676,6 +1726,7 @@ class Handler(BaseHTTPRequestHandler):
   <div class="actions">
     <a class="button secondary" href="/edit/{quote(row["id"])}">Edit</a>
     <a class="button secondary" href="/raw/{quote(row["id"])}">Raw</a>
+    <button class="button secondary" type="button" data-copy-url="{escape(raw_url(row["id"]))}">Copy raw URL</button>
     <a class="button secondary" href="/download/{quote(row["id"])}">Download</a>
     <a class="button secondary" href="/delete/{quote(row["id"])}?owner=1">Delete</a>
   </div>
