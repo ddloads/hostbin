@@ -989,7 +989,7 @@ class Handler(BaseHTTPRequestHandler):
 {error_html}
 <form method="post" action="{escape(action)}" enctype="multipart/form-data">
   <label>Paste content
-    <textarea name="body" maxlength="{MAX_PASTE_BYTES}" required>{escape(values.get("body", ""))}</textarea>
+    <textarea name="body" maxlength="{MAX_PASTE_BYTES}">{escape(values.get("body", ""))}</textarea>
     <span class="hint">Maximum size: {MAX_PASTE_BYTES:,} bytes.</span>
   </label>
   <label>Create from file
