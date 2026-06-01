@@ -36,6 +36,7 @@ LANGUAGES = [
     "Java",
     "JavaScript",
     "JSON",
+    "Lua",
     "Markdown",
     "PHP",
     "Python",
