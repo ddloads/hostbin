@@ -1,4 +1,6 @@
 import base64
+import email.parser
+import email.policy
 import hashlib
 import hmac
 import html
@@ -10,6 +12,7 @@ import time
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, quote, urlencode, unquote, urlparse
 from urllib.request import Request, urlopen
 
@@ -575,10 +578,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_form(self):
         length = int(self.headers.get("Content-Length", "0"))
-        if length > MAX_PASTE_BYTES + 8192:
+        if length > MAX_PASTE_BYTES + 65536:
             return None
-        body = self.rfile.read(length).decode("utf-8", errors="replace")
-        return {key: values[-1] for key, values in parse_qs(body, keep_blank_values=True).items()}
+        body = self.rfile.read(length)
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.startswith("multipart/form-data"):
+            return self.read_multipart_form(content_type, body)
+        text = body.decode("utf-8", errors="replace")
+        return {key: values[-1] for key, values in parse_qs(text, keep_blank_values=True).items()}
+
+    def read_multipart_form(self, content_type, body):
+        message = email.parser.BytesParser(policy=email.policy.default).parsebytes(
+            b"Content-Type: " + content_type.encode("utf-8") + b"\r\n\r\n" + body
+        )
+        form = {}
+        for part in message.iter_parts():
+            name = part.get_param("name", header="content-disposition")
+            if not name:
+                continue
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            if filename:
+                form[name] = SimpleNamespace(
+                    filename=filename,
+                    content=payload,
+                    text=payload.decode("utf-8-sig", errors="replace"),
+                )
+            else:
+                charset = part.get_content_charset() or "utf-8"
+                form[name] = payload.decode(charset, errors="replace")
+        upload = form.get("file")
+        if upload and upload.content:
+            form["uploaded_filename"] = upload.filename
+            form["body"] = upload.text
+        return form
 
     def get_flash(self):
         header = self.headers.get("Cookie", "")
@@ -954,10 +987,14 @@ class Handler(BaseHTTPRequestHandler):
         content = f"""
 <h1>{escape(title)}</h1>
 {error_html}
-<form method="post" action="{escape(action)}">
+<form method="post" action="{escape(action)}" enctype="multipart/form-data">
   <label>Paste content
     <textarea name="body" maxlength="{MAX_PASTE_BYTES}" required>{escape(values.get("body", ""))}</textarea>
     <span class="hint">Maximum size: {MAX_PASTE_BYTES:,} bytes.</span>
+  </label>
+  <label>Create from file
+    <input name="file" type="file" accept=".txt,.log,.md,.json,.js,.ts,.py,.lua,.html,.css,.sql,.yaml,.yml,.sh,.php,.rb,.rs,.go,.java,.c,.cpp,text/*">
+    <span class="hint">Choose a text file to use as the paste content. Uploaded file content replaces the text area when submitted.</span>
   </label>
   <div class="grid">
     <label>Title
@@ -1025,7 +1062,8 @@ class Handler(BaseHTTPRequestHandler):
         expires_at = now + expires_in if expires_in else None
         delete_token = secrets.token_urlsafe(24)
         paste_id = make_id()
-        title = (form.get("title") or "Untitled paste").strip()[:120]
+        default_title = form.get("uploaded_filename") or "Untitled paste"
+        title = (form.get("title") or default_title).strip()[:120]
         language = form.get("language") if form.get("language") in LANGUAGES else "Plain Text"
         visibility = "public" if form.get("visibility") == "public" else "unlisted"
         password = form.get("password", "")
@@ -1101,7 +1139,8 @@ class Handler(BaseHTTPRequestHandler):
         expires_key = form.get("expires", "never")
         expires_in = EXPIRATIONS.get(expires_key)
         expires_at = int(time.time()) + expires_in if expires_in else None
-        title = (form.get("title") or "Untitled paste").strip()[:120]
+        default_title = form.get("uploaded_filename") or "Untitled paste"
+        title = (form.get("title") or default_title).strip()[:120]
         language = form.get("language") if form.get("language") in LANGUAGES else "Plain Text"
         visibility = "public" if form.get("visibility") == "public" else "unlisted"
         with get_db() as db:
