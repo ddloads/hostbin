@@ -20,6 +20,8 @@ MAX_PASTE_BYTES = int(os.getenv("MAX_PASTE_BYTES", str(1024 * 1024)))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8080"))
 COOKIE_NAME = "hostbin_flash"
+SESSION_COOKIE_NAME = "hostbin_session"
+SESSION_TTL = 30 * 24 * 60 * 60
 
 
 LANGUAGES = [
@@ -59,6 +61,27 @@ def init_db():
     with sqlite3.connect(DB_PATH) as db:
         db.execute(
             """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        db.execute(
+            """
             CREATE TABLE IF NOT EXISTS pastes (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -74,8 +97,13 @@ def init_db():
             )
             """
         )
+        columns = {row[1] for row in db.execute("PRAGMA table_info(pastes)").fetchall()}
+        if "owner_user_id" not in columns:
+            db.execute("ALTER TABLE pastes ADD COLUMN owner_user_id INTEGER")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_created ON pastes(created_at DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_expires ON pastes(expires_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_owner ON pastes(owner_user_id, created_at DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
 
 
 def get_db():
@@ -139,13 +167,30 @@ def clear_flash_cookie():
     return f"{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
 
 
+def session_cookie(token):
+    return f"{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}"
+
+
+def clear_session_cookie():
+    return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+
+
+def session_token_hash(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def absolute(path):
     return f"{BASE_URL}{path}" if BASE_URL else path
 
 
-def layout(title, content, flash=None):
+def layout(title, content, flash=None, user=None):
     safe_title = escape(f"{title} - {APP_NAME}" if title else APP_NAME)
     flash_html = f'<div class="flash">{escape(flash)}</div>' if flash else ""
+    account_links = (
+        f'<a href="/my">My pastes</a><span class="nav-user">{escape(user["username"])}</span><a href="/logout">Log out</a>'
+        if user
+        else '<a href="/login">Log in</a><a href="/signup">Sign up</a>'
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -160,12 +205,24 @@ def layout(title, content, flash=None):
     <nav>
       <a href="/new">New paste</a>
       <a href="/public">Public</a>
+      {account_links}
+      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle dark mode" title="Toggle dark mode">Dark</button>
     </nav>
   </header>
   <main>
     {flash_html}
     {content}
   </main>
+  <script>
+    const root = document.documentElement;
+    const savedTheme = localStorage.getItem("hostbin-theme");
+    if (savedTheme) root.dataset.theme = savedTheme;
+    document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {{
+      const next = root.dataset.theme === "dark" ? "light" : "dark";
+      root.dataset.theme = next;
+      localStorage.setItem("hostbin-theme", next);
+    }});
+  </script>
 </body>
 </html>"""
 
@@ -184,6 +241,25 @@ def css():
   --danger: #b42318;
   --code-bg: #111827;
   --code-ink: #edf2f7;
+  --input-bg: #ffffff;
+  --button-soft: #e6f4f1;
+  --topbar-bg: rgba(255,255,255,.82);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101214;
+  --panel: #191d20;
+  --ink: #eef2f3;
+  --muted: #9aa6aa;
+  --line: #30383d;
+  --accent: #2dd4bf;
+  --accent-strong: #5eead4;
+  --danger: #f87171;
+  --code-bg: #05070a;
+  --code-ink: #e5eef5;
+  --input-bg: #111518;
+  --button-soft: #173633;
+  --topbar-bg: rgba(16,18,20,.86);
 }
 * { box-sizing: border-box; }
 body {
@@ -201,7 +277,7 @@ a:hover { text-decoration: underline; }
   gap: 16px;
   padding: 14px clamp(16px, 4vw, 48px);
   border-bottom: 1px solid var(--line);
-  background: rgba(255,255,255,.82);
+  background: var(--topbar-bg);
   backdrop-filter: blur(10px);
   position: sticky;
   top: 0;
@@ -213,7 +289,8 @@ a:hover { text-decoration: underline; }
   font-size: 20px;
   letter-spacing: 0;
 }
-nav { display: flex; gap: 14px; flex-wrap: wrap; }
+nav { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.nav-user { color: var(--muted); font-size: 13px; }
 main {
   width: min(1120px, calc(100% - 32px));
   margin: 28px auto 48px;
@@ -255,7 +332,16 @@ p { margin: 0 0 16px; color: var(--muted); }
   background: transparent;
   color: var(--accent);
 }
-.button.secondary:hover { background: #e6f4f1; }
+.button.secondary:hover { background: var(--button-soft); }
+.theme-toggle {
+  min-height: 32px;
+  padding: 0 10px;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+}
+.theme-toggle:hover { background: var(--button-soft); color: var(--ink); }
 form { display: grid; gap: 14px; }
 .grid {
   display: grid;
@@ -270,7 +356,7 @@ input, select, textarea {
   padding: 10px 12px;
   font: inherit;
   color: var(--ink);
-  background: #fff;
+  background: var(--input-bg);
 }
 textarea {
   min-height: 420px;
@@ -302,7 +388,7 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 2px 8px;
-  background: #f8faf9;
+  background: var(--input-bg);
   color: var(--muted);
   font-size: 12px;
 }
@@ -335,10 +421,19 @@ pre {
   padding: 12px 14px;
   margin-bottom: 16px;
 }
+html[data-theme="dark"] .flash {
+  background: #123325;
+  border-color: #1d6b4b;
+  color: #bbf7d0;
+}
 .error {
   border-color: #f3b2aa;
   background: #fff5f4;
   color: var(--danger);
+}
+html[data-theme="dark"] .error {
+  border-color: #7f1d1d;
+  background: #2b1214;
 }
 .empty { padding: 26px; text-align: center; color: var(--muted); }
 @media (max-width: 760px) {
@@ -361,8 +456,16 @@ class Handler(BaseHTTPRequestHandler):
             self.home()
         elif path == "/new":
             self.new_form()
+        elif path == "/my":
+            self.my_pastes()
         elif path == "/public":
             self.public_list()
+        elif path == "/signup":
+            self.signup_form()
+        elif path == "/login":
+            self.login_form()
+        elif path == "/logout":
+            self.logout()
         elif path.startswith("/p/"):
             self.view_paste(unquote(path.removeprefix("/p/")))
         elif path.startswith("/raw/"):
@@ -376,6 +479,10 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/create":
             self.create_paste()
+        elif path == "/signup":
+            self.signup()
+        elif path == "/login":
+            self.login()
         elif path.startswith("/p/"):
             self.view_paste(unquote(path.removeprefix("/p/")), posted=True)
         else:
@@ -402,12 +509,36 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return None
 
-    def send_html(self, title, content, status=200, flash=None, headers=None):
-        body = layout(title, content, flash if flash is not None else self.get_flash()).encode("utf-8")
+    def current_user(self):
+        header = self.headers.get("Cookie", "")
+        jar = cookies.SimpleCookie(header)
+        morsel = jar.get(SESSION_COOKIE_NAME)
+        if not morsel:
+            return None
+        now = int(time.time())
+        token_hash = session_token_hash(morsel.value)
+        with get_db() as db:
+            row = db.execute(
+                """
+                SELECT users.id, users.username
+                FROM sessions
+                JOIN users ON users.id = sessions.user_id
+                WHERE sessions.token_hash = ? AND sessions.expires_at > ?
+                """,
+                (token_hash, now),
+            ).fetchone()
+            db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+        return row
+
+    def send_html(self, title, content, status=200, flash=None, headers=None, extra_cookies=None):
+        user = self.current_user()
+        body = layout(title, content, flash if flash is not None else self.get_flash(), user=user).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Set-Cookie", clear_flash_cookie())
+        for cookie in extra_cookies or []:
+            self.send_header("Set-Cookie", cookie)
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -421,22 +552,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def redirect(self, location, flash=None):
+    def redirect(self, location, flash=None, extra_cookies=None):
         self.send_response(303)
         self.send_header("Location", location)
         if flash:
             self.send_header("Set-Cookie", flash_cookie(flash))
+        for cookie in extra_cookies or []:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
 
     def home(self):
+        user = self.current_user()
+        user_action = (
+            '<a class="button secondary" href="/my">View my pastes</a>'
+            if user
+            else '<a class="button secondary" href="/signup">Create an account</a>'
+        )
         content = f"""
 <section class="hero">
   <div>
     <h1>Fast, private pastes you control.</h1>
-    <p>{escape(APP_NAME)} is a compact self-hosted pastebin inspired by pastes.io: quick sharing, optional public listings, raw links, expiring pastes, passwords, and burn-after-read support.</p>
+    <p>{escape(APP_NAME)} is a compact self-hosted pastebin inspired by pastes.io: quick sharing, optional public listings, raw links, expiring pastes, passwords, user accounts, and burn-after-read support.</p>
     <div class="actions">
       <a class="button" href="/new">Create a paste</a>
       <a class="button secondary" href="/public">Browse public pastes</a>
+      {user_action}
     </div>
   </div>
   <aside class="panel">
@@ -448,6 +588,105 @@ class Handler(BaseHTTPRequestHandler):
 {self.recent_public(limit=8)}
 """
         self.send_html("", content)
+
+    def account_form(self, mode, error=None, values=None):
+        values = values or {}
+        is_signup = mode == "signup"
+        title = "Sign up" if is_signup else "Log in"
+        action = "/signup" if is_signup else "/login"
+        button = "Create account" if is_signup else "Log in"
+        switch = (
+            'Already have an account? <a href="/login">Log in</a>.'
+            if is_signup
+            else 'Need an account? <a href="/signup">Sign up</a>.'
+        )
+        error_html = f'<div class="flash error">{escape(error)}</div>' if error else ""
+        content = f"""
+<section class="panel">
+  <h1>{title}</h1>
+  <p>{switch}</p>
+  {error_html}
+  <form method="post" action="{action}">
+    <label>Username
+      <input name="username" value="{escape(values.get("username", ""))}" maxlength="40" autocomplete="username" required>
+      <span class="hint">Use 3-40 letters, numbers, underscores, or hyphens.</span>
+    </label>
+    <label>Password
+      <input name="password" type="password" minlength="8" maxlength="128" autocomplete="{"new-password" if is_signup else "current-password"}" required>
+    </label>
+    <div class="actions"><button type="submit">{button}</button></div>
+  </form>
+</section>
+"""
+        self.send_html(title, content, status=400 if error else 200)
+
+    def signup_form(self, error=None, values=None):
+        self.account_form("signup", error, values)
+
+    def login_form(self, error=None, values=None):
+        self.account_form("login", error, values)
+
+    def clean_username(self, username):
+        username = (username or "").strip()
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        if len(username) < 3 or len(username) > 40 or any(ch not in allowed for ch in username):
+            return None
+        return username
+
+    def create_session(self, user_id):
+        token = secrets.token_urlsafe(32)
+        now = int(time.time())
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                (session_token_hash(token), user_id, now, now + SESSION_TTL),
+            )
+        return token
+
+    def signup(self):
+        form = self.read_form() or {}
+        username = self.clean_username(form.get("username"))
+        password = form.get("password", "")
+        if not username:
+            self.signup_form("Choose a valid username.", form)
+            return
+        if len(password) < 8:
+            self.signup_form("Password must be at least 8 characters.", form)
+            return
+        now = int(time.time())
+        try:
+            with get_db() as db:
+                cursor = db.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                    (username, hash_secret(password), now),
+                )
+                user_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            self.signup_form("That username is already taken.", form)
+            return
+        token = self.create_session(user_id)
+        self.redirect("/my", "Account created.", extra_cookies=[session_cookie(token)])
+
+    def login(self):
+        form = self.read_form() or {}
+        username = (form.get("username") or "").strip()
+        password = form.get("password", "")
+        with get_db() as db:
+            user = db.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,)).fetchone()
+        if not user or not verify_secret(user["password_hash"], password):
+            self.login_form("Invalid username or password.", form)
+            return
+        token = self.create_session(user["id"])
+        self.redirect("/my", "Logged in.", extra_cookies=[session_cookie(token)])
+
+    def logout(self):
+        header = self.headers.get("Cookie", "")
+        jar = cookies.SimpleCookie(header)
+        morsel = jar.get(SESSION_COOKIE_NAME)
+        if morsel:
+            with get_db() as db:
+                db.execute("DELETE FROM sessions WHERE token_hash = ?", (session_token_hash(morsel.value),))
+        self.redirect("/", "Logged out.", extra_cookies=[clear_session_cookie()])
 
     def new_form(self, error=None, values=None):
         values = values or {}
@@ -528,13 +767,14 @@ class Handler(BaseHTTPRequestHandler):
         language = form.get("language") if form.get("language") in LANGUAGES else "Plain Text"
         visibility = "public" if form.get("visibility") == "public" else "unlisted"
         password = form.get("password", "")
+        user = self.current_user()
         with get_db() as db:
             db.execute(
                 """
                 INSERT INTO pastes (
                     id, title, body, language, visibility, burn_after_read,
-                    password_hash, delete_token_hash, views, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    password_hash, delete_token_hash, views, created_at, expires_at, owner_user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                 """,
                 (
                     paste_id,
@@ -547,6 +787,7 @@ class Handler(BaseHTTPRequestHandler):
                     hash_secret(delete_token),
                     now,
                     expires_at,
+                    user["id"] if user else None,
                 ),
             )
         self.redirect(
@@ -593,8 +834,12 @@ class Handler(BaseHTTPRequestHandler):
             db.execute("UPDATE pastes SET views = views + 1 WHERE id = ?", (paste_id,))
         delete_token = parse_qs(urlparse(self.path).query).get("delete", [""])[0]
         delete_link = ""
+        user = self.current_user()
+        owns_paste = user and paste["owner_user_id"] == user["id"]
         if delete_token and verify_secret(paste["delete_token_hash"], delete_token):
             delete_link = f'<a class="button secondary" href="/delete/{quote(paste_id)}?token={quote(delete_token)}">Delete</a>'
+        elif owns_paste:
+            delete_link = f'<a class="button secondary" href="/delete/{quote(paste_id)}?owner=1">Delete</a>'
         body = escape(paste["body"])
         raw_path = f"/raw/{quote(paste_id)}"
         content = f"""
@@ -639,23 +884,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def delete_paste(self, paste_id):
         token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+        owner_delete = parse_qs(urlparse(self.path).query).get("owner", [""])[0] == "1"
         paste = self.load_paste(paste_id)
-        if not paste or not verify_secret(paste["delete_token_hash"], token):
+        user = self.current_user()
+        owns_paste = user and paste and paste["owner_user_id"] == user["id"]
+        if not paste or not (verify_secret(paste["delete_token_hash"], token) or (owner_delete and owns_paste)):
             self.not_found()
             return
         with get_db() as db:
             db.execute("DELETE FROM pastes WHERE id = ?", (paste_id,))
-        self.redirect("/", "Paste deleted.")
+        self.redirect("/my" if owns_paste else "/", "Paste deleted.")
 
     def recent_public(self, limit=20):
         now = int(time.time())
         with get_db() as db:
             rows = db.execute(
                 """
-                SELECT id, title, language, views, created_at, expires_at
+                SELECT pastes.id, pastes.title, pastes.language, pastes.views,
+                       pastes.created_at, pastes.expires_at, users.username
                 FROM pastes
+                LEFT JOIN users ON users.id = pastes.owner_user_id
                 WHERE visibility = 'public' AND (expires_at IS NULL OR expires_at > ?)
-                ORDER BY created_at DESC
+                ORDER BY pastes.created_at DESC
                 LIMIT ?
                 """,
                 (now, limit),
@@ -671,6 +921,7 @@ class Handler(BaseHTTPRequestHandler):
     <h3><a href="/p/{quote(row["id"])}">{escape(row["title"])}</a></h3>
     <div class="meta">
       <span class="badge">{escape(row["language"])}</span>
+      <span>{escape(row["username"]) if row["username"] else "anonymous"}</span>
       <span>{age(row["created_at"])}</span>
       <span>{row["views"]} views</span>
       <span>expires {short_time(row["expires_at"])}</span>
@@ -683,6 +934,60 @@ class Handler(BaseHTTPRequestHandler):
 
     def public_list(self):
         self.send_html("Public pastes", f"<h1>Public pastes</h1>{self.recent_public(limit=50)}")
+
+    def my_pastes(self):
+        user = self.current_user()
+        if not user:
+            self.redirect("/login", "Log in to see your pastes.")
+            return
+        now = int(time.time())
+        with get_db() as db:
+            rows = db.execute(
+                """
+                SELECT id, title, language, visibility, views, created_at, expires_at
+                FROM pastes
+                WHERE owner_user_id = ? AND (expires_at IS NULL OR expires_at > ?)
+                ORDER BY created_at DESC
+                LIMIT 100
+                """,
+                (user["id"], now),
+            ).fetchall()
+        if not rows:
+            listing = '<section class="panel empty">You have not created any pastes yet.</section>'
+        else:
+            items = []
+            for row in rows:
+                items.append(
+                    f"""
+<article class="paste-row">
+  <div>
+    <h3><a href="/p/{quote(row["id"])}">{escape(row["title"])}</a></h3>
+    <div class="meta">
+      <span class="badge">{escape(row["language"])}</span>
+      <span>{escape(row["visibility"])}</span>
+      <span>{age(row["created_at"])}</span>
+      <span>{row["views"]} views</span>
+      <span>expires {short_time(row["expires_at"])}</span>
+    </div>
+  </div>
+  <div class="actions">
+    <a class="button secondary" href="/raw/{quote(row["id"])}">Raw</a>
+    <a class="button secondary" href="/delete/{quote(row["id"])}?owner=1">Delete</a>
+  </div>
+</article>"""
+                )
+            listing = f'<section><div class="paste-list">{"".join(items)}</div></section>'
+        content = f"""
+<section class="paste-head">
+  <div>
+    <h1>My pastes</h1>
+    <p>Signed in as {escape(user["username"])}.</p>
+  </div>
+  <div class="actions"><a class="button" href="/new">Create paste</a></div>
+</section>
+{listing}
+"""
+        self.send_html("My pastes", content)
 
     def not_found(self, text=False):
         if text:
