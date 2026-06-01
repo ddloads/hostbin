@@ -6,6 +6,7 @@ import hmac
 import html
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -27,7 +28,7 @@ PORT = int(os.getenv("PORT", "8080"))
 COOKIE_NAME = "hostbin_flash"
 SESSION_COOKIE_NAME = "hostbin_session"
 SESSION_TTL = 30 * 24 * 60 * 60
-ASSET_VERSION = "2026-06-01-1"
+ASSET_VERSION = "2026-06-01-2"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
@@ -38,6 +39,7 @@ OAUTH_STATE_COOKIE_NAME = "hostbin_oauth_state"
 
 
 LANGUAGES = [
+    "Auto Detect",
     "Plain Text",
     "Bash",
     "C",
@@ -59,6 +61,56 @@ LANGUAGES = [
     "TypeScript",
     "YAML",
 ]
+
+STORED_LANGUAGES = [lang for lang in LANGUAGES if lang != "Auto Detect"]
+
+EXTENSION_LANGUAGES = {
+    ".bash": "Bash",
+    ".c": "C",
+    ".cc": "C++",
+    ".cpp": "C++",
+    ".css": "CSS",
+    ".dockerfile": "Dockerfile",
+    ".go": "Go",
+    ".h": "C",
+    ".hpp": "C++",
+    ".htm": "HTML",
+    ".html": "HTML",
+    ".java": "Java",
+    ".js": "JavaScript",
+    ".json": "JSON",
+    ".lua": "Lua",
+    ".md": "Markdown",
+    ".php": "PHP",
+    ".py": "Python",
+    ".rb": "Ruby",
+    ".rs": "Rust",
+    ".sh": "Bash",
+    ".sql": "SQL",
+    ".ts": "TypeScript",
+    ".yaml": "YAML",
+    ".yml": "YAML",
+}
+
+KEYWORDS = {
+    "Bash": {"case", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if", "in", "then", "while"},
+    "C": {"auto", "break", "case", "char", "const", "continue", "default", "double", "else", "enum", "float", "for", "if", "int", "long", "return", "short", "sizeof", "static", "struct", "switch", "typedef", "void", "while"},
+    "C++": {"auto", "bool", "break", "case", "class", "const", "constexpr", "continue", "default", "double", "else", "enum", "float", "for", "if", "int", "namespace", "new", "private", "protected", "public", "return", "static", "struct", "switch", "template", "typename", "using", "void", "while"},
+    "CSS": {"align-items", "background", "border", "color", "display", "font", "grid", "height", "margin", "padding", "position", "width"},
+    "Dockerfile": {"ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM", "LABEL", "RUN", "USER", "VOLUME", "WORKDIR"},
+    "Go": {"break", "case", "chan", "const", "continue", "defer", "else", "fallthrough", "for", "func", "go", "if", "import", "interface", "map", "package", "range", "return", "select", "struct", "switch", "type", "var"},
+    "Java": {"abstract", "boolean", "break", "case", "catch", "class", "const", "continue", "else", "enum", "extends", "final", "for", "if", "implements", "import", "interface", "new", "package", "private", "protected", "public", "return", "static", "throws", "try", "void", "while"},
+    "JavaScript": {"async", "await", "break", "case", "catch", "class", "const", "continue", "default", "else", "export", "extends", "finally", "for", "function", "if", "import", "let", "new", "return", "switch", "throw", "try", "var", "while", "yield"},
+    "JSON": {"true", "false", "null"},
+    "Lua": {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"},
+    "PHP": {"class", "echo", "else", "elseif", "extends", "foreach", "function", "if", "namespace", "new", "private", "protected", "public", "return", "static", "use", "while"},
+    "Python": {"and", "as", "assert", "async", "await", "break", "class", "continue", "def", "elif", "else", "except", "False", "finally", "for", "from", "if", "import", "in", "is", "lambda", "None", "not", "or", "pass", "return", "True", "try", "while", "with", "yield"},
+    "Ruby": {"begin", "class", "def", "do", "else", "elsif", "end", "false", "if", "module", "nil", "return", "self", "then", "true", "unless", "while", "yield"},
+    "Rust": {"as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while"},
+    "SQL": {"ALTER", "AND", "AS", "CREATE", "DELETE", "DROP", "FROM", "GROUP", "INSERT", "INTO", "JOIN", "LIMIT", "NOT", "NULL", "OR", "ORDER", "SELECT", "SET", "TABLE", "UPDATE", "VALUES", "WHERE"},
+    "TypeScript": {"any", "async", "await", "break", "case", "catch", "class", "const", "continue", "default", "else", "enum", "export", "extends", "finally", "for", "function", "if", "implements", "import", "interface", "let", "new", "private", "protected", "public", "return", "switch", "throw", "try", "type", "var", "while"},
+    "YAML": {"false", "null", "true"},
+}
 
 EXPIRATIONS = {
     "never": None,
@@ -177,6 +229,130 @@ def age(ts):
 
 def escape(value):
     return html.escape(value or "", quote=True)
+
+
+def detect_language(body, filename=None, selected=None):
+    if selected and selected != "Auto Detect" and selected in STORED_LANGUAGES:
+        return selected
+    if filename:
+        lowered = filename.lower()
+        if lowered == "dockerfile" or lowered.endswith(".dockerfile"):
+            return "Dockerfile"
+        ext = Path(lowered).suffix
+        if ext in EXTENSION_LANGUAGES:
+            return EXTENSION_LANGUAGES[ext]
+    stripped = (body or "").lstrip()
+    sample = stripped[:2000]
+    if not sample:
+        return "Plain Text"
+    if sample.startswith("<!doctype html") or sample.startswith("<html") or re.search(r"<[a-zA-Z][^>]*>", sample):
+        return "HTML"
+    if sample.startswith("{") or sample.startswith("["):
+        try:
+            json.loads(sample)
+            return "JSON"
+        except Exception:
+            pass
+    if re.search(r"\b(local\s+function|local\s+\w+\s*=|end\s*$|then\s*$)", sample, re.MULTILINE):
+        return "Lua"
+    if re.search(r"\b(def|import|from|class)\s+\w+", sample):
+        return "Python"
+    if re.search(r"\b(function|const|let|=>|console\.log)\b", sample):
+        return "JavaScript"
+    if re.search(r"\b(interface|type)\s+\w+\s*[={]", sample):
+        return "TypeScript"
+    if re.search(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE TABLE)\b", sample, re.IGNORECASE):
+        return "SQL"
+    if re.search(r"^\s*FROM\s+\S+", sample, re.MULTILINE):
+        return "Dockerfile"
+    if re.search(r"^\s*[-\w]+\s*:\s+", sample, re.MULTILINE):
+        return "YAML"
+    if re.search(r"^\s*#include\s+<", sample, re.MULTILINE):
+        return "C++" if "::" in sample or "std::" in sample else "C"
+    if re.search(r"\bpackage\s+main\b|\bfunc\s+\w+\(", sample):
+        return "Go"
+    if re.search(r"\b(fn|let|impl|struct)\s+\w+", sample):
+        return "Rust"
+    if sample.startswith("#!") or re.search(r"\b(echo|fi|done|elif)\b", sample):
+        return "Bash"
+    return "Plain Text"
+
+
+def line_comment_marker(language):
+    return {
+        "Bash": "#",
+        "Dockerfile": "#",
+        "Lua": "--",
+        "Python": "#",
+        "Ruby": "#",
+        "SQL": "--",
+        "YAML": "#",
+    }.get(language, "//" if language in {"C", "C++", "Go", "Java", "JavaScript", "PHP", "Rust", "TypeScript"} else None)
+
+
+def split_comment(line, marker):
+    if not marker:
+        return line, ""
+    quote_char = None
+    escaped = False
+    for index, char in enumerate(line):
+        if quote_char:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote_char:
+                quote_char = None
+            continue
+        if char in {"'", '"', "`"}:
+            quote_char = char
+            continue
+        if line.startswith(marker, index):
+            return line[:index], line[index:]
+    return line, ""
+
+
+def highlight_non_comment(text, language):
+    if not text:
+        return ""
+    keywords = KEYWORDS.get(language, set())
+    string_pattern = re.compile(r"('(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`)")
+    output = []
+    cursor = 0
+    for match in string_pattern.finditer(text):
+        output.append(highlight_words(text[cursor:match.start()], keywords))
+        output.append(f'<span class="tok-string">{escape(match.group(0))}</span>')
+        cursor = match.end()
+    output.append(highlight_words(text[cursor:], keywords))
+    return "".join(output)
+
+
+def highlight_words(text, keywords):
+    escaped_text = escape(text)
+    if keywords:
+        keyword_pattern = re.compile(r"\b(" + "|".join(re.escape(word) for word in sorted(keywords, key=len, reverse=True)) + r")\b")
+        escaped_text = keyword_pattern.sub(r'<span class="tok-keyword">\1</span>', escaped_text)
+    escaped_text = re.sub(r"\b(\d+(?:\.\d+)?)\b", r'<span class="tok-number">\1</span>', escaped_text)
+    return escaped_text
+
+
+def highlight_code(body, language):
+    if language == "Plain Text" or not body:
+        return escape(body)
+    marker = line_comment_marker(language)
+    highlighted = []
+    for line in body.splitlines(keepends=True):
+        ending = ""
+        if line.endswith("\r\n"):
+            line, ending = line[:-2], "\r\n"
+        elif line.endswith("\n"):
+            line, ending = line[:-1], "\n"
+        code_part, comment_part = split_comment(line, marker)
+        rendered = highlight_non_comment(code_part, language)
+        if comment_part:
+            rendered += f'<span class="tok-comment">{escape(comment_part)}</span>'
+        highlighted.append(rendered + ending)
+    return "".join(highlighted)
 
 
 def flash_cookie(message):
@@ -488,6 +664,14 @@ pre {
   overflow-wrap: anywhere;
   font: 14px/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 }
+.tok-keyword { color: #93c5fd; font-weight: 700; }
+.tok-string { color: #86efac; }
+.tok-comment { color: #94a3b8; font-style: italic; }
+.tok-number { color: #fbbf24; }
+html[data-theme="dark"] .tok-keyword { color: #7dd3fc; }
+html[data-theme="dark"] .tok-string { color: #bbf7d0; }
+html[data-theme="dark"] .tok-comment { color: #718096; }
+html[data-theme="dark"] .tok-number { color: #facc15; }
 .flash {
   background: #ecfdf3;
   border: 1px solid #abd7bd;
@@ -1064,7 +1248,7 @@ class Handler(BaseHTTPRequestHandler):
         paste_id = make_id()
         default_title = form.get("uploaded_filename") or "Untitled paste"
         title = (form.get("title") or default_title).strip()[:120]
-        language = form.get("language") if form.get("language") in LANGUAGES else "Plain Text"
+        language = detect_language(body, form.get("uploaded_filename"), form.get("language"))
         visibility = "public" if form.get("visibility") == "public" else "unlisted"
         password = form.get("password", "")
         user = self.current_user()
@@ -1141,7 +1325,7 @@ class Handler(BaseHTTPRequestHandler):
         expires_at = int(time.time()) + expires_in if expires_in else None
         default_title = form.get("uploaded_filename") or "Untitled paste"
         title = (form.get("title") or default_title).strip()[:120]
-        language = form.get("language") if form.get("language") in LANGUAGES else "Plain Text"
+        language = detect_language(body, form.get("uploaded_filename"), form.get("language"))
         visibility = "public" if form.get("visibility") == "public" else "unlisted"
         with get_db() as db:
             db.execute(
@@ -1192,7 +1376,7 @@ class Handler(BaseHTTPRequestHandler):
         elif owns_paste:
             delete_link = f'<a class="button secondary" href="/delete/{quote(paste_id)}?owner=1">Delete</a>'
         edit_link = f'<a class="button secondary" href="/edit/{quote(paste_id)}">Edit</a>' if owns_paste else ""
-        body = escape(paste["body"])
+        body = highlight_code(paste["body"], paste["language"])
         raw_path = f"/raw/{quote(paste_id)}"
         content = f"""
 <section class="paste-head">
