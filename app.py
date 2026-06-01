@@ -544,6 +544,8 @@ class Handler(BaseHTTPRequestHandler):
             self.google_start()
         elif path == "/auth/google/callback":
             self.google_callback()
+        elif path.startswith("/edit/"):
+            self.edit_paste_form(unquote(path.removeprefix("/edit/")))
         elif path.startswith("/p/"):
             self.view_paste(unquote(path.removeprefix("/p/")))
         elif path.startswith("/raw/"):
@@ -561,6 +563,8 @@ class Handler(BaseHTTPRequestHandler):
             self.signup()
         elif path == "/login":
             self.login()
+        elif path.startswith("/edit/"):
+            self.update_paste(unquote(path.removeprefix("/edit/")))
         elif path.startswith("/p/"):
             self.view_paste(unquote(path.removeprefix("/p/")), posted=True)
         else:
@@ -907,6 +911,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def new_form(self, error=None, values=None):
         values = values or {}
+        self.paste_form("New paste", "/create", "Create paste", values, error)
+
+    def paste_form(self, title, action, button, values=None, error=None):
+        values = values or {}
         lang_options = "".join(
             f'<option value="{escape(lang)}" {"selected" if values.get("language") == lang else ""}>{escape(lang)}</option>'
             for lang in LANGUAGES
@@ -923,10 +931,30 @@ class Handler(BaseHTTPRequestHandler):
             ]
         )
         error_html = f'<div class="flash error">{escape(error)}</div>' if error else ""
+        show_password = action == "/create"
+        password_html = (
+            """
+    <label>Password
+      <input name="password" type="password" maxlength="128" autocomplete="new-password" placeholder="Optional">
+    </label>
+"""
+            if show_password
+            else '<p class="hint">Password and burn-after-read settings cannot be changed after creation.</p>'
+        )
+        burn_html = (
+            f"""
+    <label class="checkline">
+      <input name="burn_after_read" type="checkbox" value="1" {"checked" if values.get("burn_after_read") == "1" else ""}>
+      Burn after first successful read
+    </label>
+"""
+            if show_password
+            else ""
+        )
         content = f"""
-<h1>New paste</h1>
+<h1>{escape(title)}</h1>
 {error_html}
-<form method="post" action="/create">
+<form method="post" action="{escape(action)}">
   <label>Paste content
     <textarea name="body" maxlength="{MAX_PASTE_BYTES}" required>{escape(values.get("body", ""))}</textarea>
     <span class="hint">Maximum size: {MAX_PASTE_BYTES:,} bytes.</span>
@@ -947,20 +975,37 @@ class Handler(BaseHTTPRequestHandler):
     <label>Expires
       <select name="expires">{exp_options}</select>
     </label>
-    <label>Password
-      <input name="password" type="password" maxlength="128" autocomplete="new-password" placeholder="Optional">
-    </label>
-    <label class="checkline">
-      <input name="burn_after_read" type="checkbox" value="1" {"checked" if values.get("burn_after_read") == "1" else ""}>
-      Burn after first successful read
-    </label>
+    {password_html}
+    {burn_html}
   </div>
   <div class="actions">
-    <button type="submit">Create paste</button>
+    <button type="submit">{escape(button)}</button>
   </div>
 </form>
 """
-        self.send_html("New paste", content)
+        self.send_html(title, content)
+
+    def paste_to_form_values(self, paste):
+        expires_key = "never"
+        if paste["expires_at"]:
+            remaining = max(0, paste["expires_at"] - int(time.time()))
+            if remaining <= EXPIRATIONS["10m"]:
+                expires_key = "10m"
+            elif remaining <= EXPIRATIONS["1h"]:
+                expires_key = "1h"
+            elif remaining <= EXPIRATIONS["1d"]:
+                expires_key = "1d"
+            elif remaining <= EXPIRATIONS["1w"]:
+                expires_key = "1w"
+            else:
+                expires_key = "1mo"
+        return {
+            "title": paste["title"],
+            "body": paste["body"],
+            "language": paste["language"],
+            "visibility": paste["visibility"],
+            "expires": expires_key,
+        }
 
     def create_paste(self):
         form = self.read_form()
@@ -1020,6 +1065,56 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return paste
 
+    def require_owned_paste(self, paste_id):
+        user = self.current_user()
+        if not user:
+            self.redirect("/login", "Log in to edit your pastes.")
+            return None, None
+        paste = self.load_paste(paste_id)
+        if not paste or paste["owner_user_id"] != user["id"]:
+            self.not_found()
+            return None, None
+        return user, paste
+
+    def edit_paste_form(self, paste_id, error=None, values=None):
+        _, paste = self.require_owned_paste(paste_id)
+        if not paste:
+            return
+        form_values = values or self.paste_to_form_values(paste)
+        self.paste_form("Edit paste", f"/edit/{quote(paste_id)}", "Save changes", form_values, error)
+
+    def update_paste(self, paste_id):
+        _, paste = self.require_owned_paste(paste_id)
+        if not paste:
+            return
+        form = self.read_form()
+        if form is None:
+            self.edit_paste_form(paste_id, "Paste is too large.")
+            return
+        body = form.get("body", "")
+        if not body.strip():
+            self.edit_paste_form(paste_id, "Paste content is required.", form)
+            return
+        if len(body.encode("utf-8")) > MAX_PASTE_BYTES:
+            self.edit_paste_form(paste_id, "Paste exceeds the configured size limit.", form)
+            return
+        expires_key = form.get("expires", "never")
+        expires_in = EXPIRATIONS.get(expires_key)
+        expires_at = int(time.time()) + expires_in if expires_in else None
+        title = (form.get("title") or "Untitled paste").strip()[:120]
+        language = form.get("language") if form.get("language") in LANGUAGES else "Plain Text"
+        visibility = "public" if form.get("visibility") == "public" else "unlisted"
+        with get_db() as db:
+            db.execute(
+                """
+                UPDATE pastes
+                SET title = ?, body = ?, language = ?, visibility = ?, expires_at = ?
+                WHERE id = ?
+                """,
+                (title, body, language, visibility, expires_at, paste_id),
+            )
+        self.redirect(f"/p/{quote(paste_id)}", "Paste updated.")
+
     def password_form(self, paste_id, error=None):
         error_html = f'<div class="flash error">{escape(error)}</div>' if error else ""
         content = f"""
@@ -1057,6 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
             delete_link = f'<a class="button secondary" href="/delete/{quote(paste_id)}?token={quote(delete_token)}">Delete</a>'
         elif owns_paste:
             delete_link = f'<a class="button secondary" href="/delete/{quote(paste_id)}?owner=1">Delete</a>'
+        edit_link = f'<a class="button secondary" href="/edit/{quote(paste_id)}">Edit</a>' if owns_paste else ""
         body = escape(paste["body"])
         raw_path = f"/raw/{quote(paste_id)}"
         content = f"""
@@ -1074,6 +1170,7 @@ class Handler(BaseHTTPRequestHandler):
   <div class="actions">
     <a class="button secondary" href="{raw_path}">Raw</a>
     <a class="button secondary" href="/new">New</a>
+    {edit_link}
     {delete_link}
   </div>
 </section>
@@ -1188,6 +1285,7 @@ class Handler(BaseHTTPRequestHandler):
     </div>
   </div>
   <div class="actions">
+    <a class="button secondary" href="/edit/{quote(row["id"])}">Edit</a>
     <a class="button secondary" href="/raw/{quote(row["id"])}">Raw</a>
     <a class="button secondary" href="/delete/{quote(row["id"])}?owner=1">Delete</a>
   </div>
