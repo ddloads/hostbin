@@ -104,6 +104,28 @@ EXTENSION_LANGUAGES = {
     ".yml": "YAML",
 }
 
+LANGUAGE_EXTENSIONS = {
+    "Bash": ".sh",
+    "C": ".c",
+    "C++": ".cpp",
+    "CSS": ".css",
+    "Dockerfile": ".Dockerfile",
+    "Go": ".go",
+    "HTML": ".html",
+    "Java": ".java",
+    "JavaScript": ".js",
+    "JSON": ".json",
+    "Lua": ".lua",
+    "Markdown": ".md",
+    "PHP": ".php",
+    "Python": ".py",
+    "Ruby": ".rb",
+    "Rust": ".rs",
+    "SQL": ".sql",
+    "TypeScript": ".ts",
+    "YAML": ".yaml",
+}
+
 KEYWORDS = {
     "Bash": {"case", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if", "in", "then", "while"},
     "C": {"auto", "break", "case", "char", "const", "continue", "default", "double", "else", "enum", "float", "for", "if", "int", "long", "return", "short", "sizeof", "static", "struct", "switch", "typedef", "void", "while"},
@@ -305,6 +327,16 @@ def clean_folder(folder):
     folder = (folder or "").strip().replace("/", "-").replace("\\", "-")
     folder = re.sub(r"\s+", " ", folder)
     return folder[:80]
+
+
+def download_filename(paste):
+    title = re.sub(r"[^A-Za-z0-9._-]+", "-", paste["title"]).strip("-._")
+    if not title:
+        title = paste["id"]
+    ext = LANGUAGE_EXTENSIONS.get(paste["language"], ".txt")
+    if title.lower().endswith(ext.lower()):
+        return title[:140]
+    return f"{title[:140]}{ext}"
 
 
 def line_comment_marker(language):
@@ -766,6 +798,8 @@ class Handler(BaseHTTPRequestHandler):
             self.view_paste(unquote(path.removeprefix("/p/")))
         elif path.startswith("/raw/"):
             self.raw_paste(unquote(path.removeprefix("/raw/")))
+        elif path.startswith("/download/"):
+            self.download_paste(unquote(path.removeprefix("/download/")))
         elif path.startswith("/delete/"):
             self.delete_paste(unquote(path.removeprefix("/delete/")))
         else:
@@ -877,6 +911,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_download(self, paste):
+        data = paste["body"].encode("utf-8")
+        filename = download_filename(paste)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(data)
 
@@ -1430,6 +1474,7 @@ class Handler(BaseHTTPRequestHandler):
         folder_meta = f'<span>folder: {escape(folder)}</span>' if folder else ""
         body = highlight_code(paste["body"], paste["language"])
         raw_path = f"/raw/{quote(paste_id)}"
+        download_path = f"/download/{quote(paste_id)}"
         content = f"""
 <section class="paste-head">
   <div>
@@ -1446,6 +1491,7 @@ class Handler(BaseHTTPRequestHandler):
   </div>
   <div class="actions">
     <a class="button secondary" href="{raw_path}">Raw</a>
+    <a class="button secondary" href="{download_path}">Download</a>
     <a class="button secondary" href="/new">New</a>
     {edit_link}
     {delete_link}
@@ -1469,6 +1515,23 @@ class Handler(BaseHTTPRequestHandler):
         with get_db() as db:
             db.execute("UPDATE pastes SET views = views + 1 WHERE id = ?", (paste_id,))
         self.send_text(paste["body"])
+        if paste["burn_after_read"]:
+            with get_db() as db:
+                db.execute("DELETE FROM pastes WHERE id = ?", (paste_id,))
+
+    def download_paste(self, paste_id):
+        paste = self.load_paste(paste_id)
+        if not paste:
+            self.not_found(text=True)
+            return
+        user = self.current_user()
+        owns_paste = user and paste["owner_user_id"] == user["id"]
+        if paste["password_hash"] and not owns_paste:
+            self.send_text("Password-protected pastes can only be downloaded by their owner.\n", status=403)
+            return
+        with get_db() as db:
+            db.execute("UPDATE pastes SET views = views + 1 WHERE id = ?", (paste_id,))
+        self.send_download(paste)
         if paste["burn_after_read"]:
             with get_db() as db:
                 db.execute("DELETE FROM pastes WHERE id = ?", (paste_id,))
@@ -1519,7 +1582,10 @@ class Handler(BaseHTTPRequestHandler):
       <span>expires {short_time(row["expires_at"])}</span>
     </div>
   </div>
-  <a class="button secondary" href="/raw/{quote(row["id"])}">Raw</a>
+  <div class="actions">
+    <a class="button secondary" href="/raw/{quote(row["id"])}">Raw</a>
+    <a class="button secondary" href="/download/{quote(row["id"])}">Download</a>
+  </div>
 </article>"""
             )
         return f'<section><h2>Recent public pastes</h2><div class="paste-list">{"".join(items)}</div></section>'
@@ -1594,6 +1660,7 @@ class Handler(BaseHTTPRequestHandler):
   <div class="actions">
     <a class="button secondary" href="/edit/{quote(row["id"])}">Edit</a>
     <a class="button secondary" href="/raw/{quote(row["id"])}">Raw</a>
+    <a class="button secondary" href="/download/{quote(row["id"])}">Download</a>
     <a class="button secondary" href="/delete/{quote(row["id"])}?owner=1">Delete</a>
   </div>
 </article>"""
