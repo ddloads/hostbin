@@ -198,6 +198,16 @@ def layout(title, content, flash=None, user=None):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{safe_title}</title>
+  <script>
+    (function () {{
+      try {{
+        var savedTheme = localStorage.getItem("hostbin-theme");
+        if (savedTheme === "dark" || savedTheme === "light") {{
+          document.documentElement.setAttribute("data-theme", savedTheme);
+        }}
+      }} catch (error) {{}}
+    }})();
+  </script>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -207,7 +217,7 @@ def layout(title, content, flash=None, user=None):
       <a href="/new">New paste</a>
       <a href="/public">Public</a>
       {account_links}
-      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle dark mode" title="Toggle dark mode">Dark</button>
+      <button class="theme-toggle" type="button" id="theme-toggle" aria-label="Toggle dark mode" title="Toggle dark mode">Dark</button>
     </nav>
   </header>
   <main>
@@ -215,14 +225,29 @@ def layout(title, content, flash=None, user=None):
     {content}
   </main>
   <script>
-    const root = document.documentElement;
-    const savedTheme = localStorage.getItem("hostbin-theme");
-    if (savedTheme) root.dataset.theme = savedTheme;
-    document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {{
-      const next = root.dataset.theme === "dark" ? "light" : "dark";
-      root.dataset.theme = next;
-      localStorage.setItem("hostbin-theme", next);
-    }});
+    (function () {{
+      var root = document.documentElement;
+      var toggle = document.getElementById("theme-toggle");
+      if (!toggle) return;
+
+      function currentTheme() {{
+        return root.getAttribute("data-theme") === "dark" ? "dark" : "light";
+      }}
+
+      function setTheme(theme) {{
+        root.setAttribute("data-theme", theme);
+        toggle.textContent = theme === "dark" ? "Light" : "Dark";
+        toggle.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+        try {{
+          localStorage.setItem("hostbin-theme", theme);
+        }} catch (error) {{}}
+      }}
+
+      setTheme(currentTheme());
+      toggle.addEventListener("click", function () {{
+        setTheme(currentTheme() === "dark" ? "light" : "dark");
+      }});
+    }})();
   </script>
 </body>
 </html>"""
