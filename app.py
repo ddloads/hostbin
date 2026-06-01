@@ -22,6 +22,7 @@ PORT = int(os.getenv("PORT", "8080"))
 COOKIE_NAME = "hostbin_flash"
 SESSION_COOKIE_NAME = "hostbin_session"
 SESSION_TTL = 30 * 24 * 60 * 60
+ASSET_VERSION = "2026-06-01-1"
 
 
 LANGUAGES = [
@@ -198,8 +199,8 @@ def layout(title, content, flash=None, user=None):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{safe_title}</title>
-  <script src="/static/app.js"></script>
-  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js?v={ASSET_VERSION}"></script>
+  <link rel="stylesheet" href="/static/app.css?v={ASSET_VERSION}">
 </head>
 <body>
   <header class="topbar">
@@ -479,9 +480,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/static/app.js":
-            self.send_text(js(), "application/javascript; charset=utf-8")
+            self.send_static(js(), "application/javascript; charset=utf-8")
         elif path == "/static/app.css":
-            self.send_text(css(), "text/css; charset=utf-8")
+            self.send_static(css(), "text/css; charset=utf-8")
         elif path == "/":
             self.home()
         elif path == "/new":
@@ -579,6 +580,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_static(self, body, content_type):
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store, max-age=0")
         self.end_headers()
         self.wfile.write(data)
 
