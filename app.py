@@ -1205,6 +1205,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def paste_form(self, title, action, button, values=None, error=None):
         values = values or {}
+        folder_options = ""
+        user = self.current_user()
+        if user:
+            with get_db() as db:
+                folders = db.execute(
+                    """
+                    SELECT DISTINCT folder
+                    FROM pastes
+                    WHERE owner_user_id = ? AND folder != ''
+                    ORDER BY lower(folder)
+                    """,
+                    (user["id"],),
+                ).fetchall()
+            folder_options = "".join(f'<option value="{escape(row["folder"])}"></option>' for row in folders)
         lang_options = "".join(
             f'<option value="{escape(lang)}" {"selected" if values.get("language") == lang else ""}>{escape(lang)}</option>'
             for lang in LANGUAGES
@@ -1268,7 +1282,9 @@ class Handler(BaseHTTPRequestHandler):
       <select name="category">{category_options}</select>
     </label>
     <label>Folder
-      <input name="folder" maxlength="80" value="{escape(values.get("folder", ""))}" placeholder="Optional folder">
+      <input name="folder" list="folder-options" maxlength="80" value="{escape(values.get("folder", ""))}" placeholder="Optional folder">
+      <datalist id="folder-options">{folder_options}</datalist>
+      <span class="hint">Pick an existing folder or type a new one.</span>
     </label>
     <label>Visibility
       <select name="visibility">
