@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import html
+import json
 import os
 import secrets
 import sqlite3
@@ -9,7 +10,8 @@ import time
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, urlencode, unquote, urlparse
+from urllib.request import Request, urlopen
 
 
 APP_NAME = os.getenv("APP_NAME", "Hostbin")
@@ -23,6 +25,13 @@ COOKIE_NAME = "hostbin_flash"
 SESSION_COOKIE_NAME = "hostbin_session"
 SESSION_TTL = 30 * 24 * 60 * 60
 ASSET_VERSION = "2026-06-01-1"
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+OAUTH_STATE_COOKIE_NAME = "hostbin_oauth_state"
 
 
 LANGUAGES = [
@@ -102,10 +111,17 @@ def init_db():
         columns = {row[1] for row in db.execute("PRAGMA table_info(pastes)").fetchall()}
         if "owner_user_id" not in columns:
             db.execute("ALTER TABLE pastes ADD COLUMN owner_user_id INTEGER")
+        user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+        if "email" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        if "google_sub" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_created ON pastes(created_at DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_expires ON pastes(expires_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_owner ON pastes(owner_user_id, created_at DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
 
 
 def get_db():
@@ -177,12 +193,24 @@ def clear_session_cookie():
     return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
 
 
+def oauth_state_cookie(state):
+    return f"{OAUTH_STATE_COOKIE_NAME}={state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600"
+
+
+def clear_oauth_state_cookie():
+    return f"{OAUTH_STATE_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+
+
 def session_token_hash(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def absolute(path):
     return f"{BASE_URL}{path}" if BASE_URL else path
+
+
+def google_enabled():
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
 
 def layout(title, content, flash=None, user=None):
@@ -362,6 +390,7 @@ p { margin: 0 0 16px; color: var(--muted); }
   color: var(--accent);
 }
 .button.secondary:hover { background: var(--button-soft); }
+.button.full { width: 100%; }
 .theme-toggle {
   min-height: 32px;
   padding: 0 10px;
@@ -372,6 +401,20 @@ p { margin: 0 0 16px; color: var(--muted); }
 }
 .theme-toggle:hover { background: var(--button-soft); color: var(--ink); }
 form { display: grid; gap: 14px; }
+.auth-stack { display: grid; gap: 14px; }
+.divider {
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.divider::before, .divider::after {
+  content: "";
+  height: 1px;
+  background: var(--line);
+  flex: 1;
+}
 .grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -497,6 +540,10 @@ class Handler(BaseHTTPRequestHandler):
             self.login_form()
         elif path == "/logout":
             self.logout()
+        elif path == "/auth/google":
+            self.google_start()
+        elif path == "/auth/google/callback":
+            self.google_callback()
         elif path.startswith("/p/"):
             self.view_paste(unquote(path.removeprefix("/p/")))
         elif path.startswith("/raw/"):
@@ -641,21 +688,32 @@ class Handler(BaseHTTPRequestHandler):
             else 'Need an account? <a href="/signup">Sign up</a>.'
         )
         error_html = f'<div class="flash error">{escape(error)}</div>' if error else ""
+        google_button = (
+            f"""
+  <a class="button secondary full" href="/auth/google">Continue with Google</a>
+  <div class="divider">or</div>
+"""
+            if google_enabled()
+            else ""
+        )
         content = f"""
 <section class="panel">
   <h1>{title}</h1>
   <p>{switch}</p>
   {error_html}
-  <form method="post" action="{action}">
-    <label>Username
-      <input name="username" value="{escape(values.get("username", ""))}" maxlength="40" autocomplete="username" required>
-      <span class="hint">Use 3-40 letters, numbers, underscores, or hyphens.</span>
-    </label>
-    <label>Password
-      <input name="password" type="password" minlength="8" maxlength="128" autocomplete="{"new-password" if is_signup else "current-password"}" required>
-    </label>
-    <div class="actions"><button type="submit">{button}</button></div>
-  </form>
+  <div class="auth-stack">
+    {google_button}
+    <form method="post" action="{action}">
+      <label>Username
+        <input name="username" value="{escape(values.get("username", ""))}" maxlength="40" autocomplete="username" required>
+        <span class="hint">Use 3-40 letters, numbers, underscores, or hyphens.</span>
+      </label>
+      <label>Password
+        <input name="password" type="password" minlength="8" maxlength="128" autocomplete="{"new-password" if is_signup else "current-password"}" required>
+      </label>
+      <div class="actions"><button type="submit">{button}</button></div>
+    </form>
+  </div>
 </section>
 """
         self.send_html(title, content, status=400 if error else 200)
@@ -673,6 +731,21 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return username
 
+    def username_from_email(self, email):
+        base = (email.split("@", 1)[0] if email else "google_user").lower()
+        cleaned = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in base).strip("_-")
+        if len(cleaned) < 3:
+            cleaned = "google_user"
+        cleaned = cleaned[:32]
+        with get_db() as db:
+            username = cleaned
+            suffix = 1
+            while db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+                tail = f"_{suffix}"
+                username = f"{cleaned[:40 - len(tail)]}{tail}"
+                suffix += 1
+            return username
+
     def create_session(self, user_id):
         token = secrets.token_urlsafe(32)
         now = int(time.time())
@@ -682,6 +755,110 @@ class Handler(BaseHTTPRequestHandler):
                 (session_token_hash(token), user_id, now, now + SESSION_TTL),
             )
         return token
+
+    def google_redirect_uri(self):
+        return GOOGLE_REDIRECT_URI or absolute("/auth/google/callback")
+
+    def google_start(self):
+        if not google_enabled():
+            self.redirect("/login", "Google sign-in is not configured.")
+            return
+        redirect_uri = self.google_redirect_uri()
+        if not redirect_uri.startswith("http"):
+            self.redirect("/login", "Set BASE_URL or GOOGLE_REDIRECT_URI before using Google sign-in.")
+            return
+        state = secrets.token_urlsafe(32)
+        query = urlencode(
+            {
+                "client_id": GOOGLE_CLIENT_ID,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": "openid email profile",
+                "state": state,
+                "prompt": "select_account",
+            }
+        )
+        self.redirect(f"{GOOGLE_AUTH_URL}?{query}", extra_cookies=[oauth_state_cookie(state)])
+
+    def google_callback(self):
+        if not google_enabled():
+            self.redirect("/login", "Google sign-in is not configured.")
+            return
+        query = parse_qs(urlparse(self.path).query)
+        code = query.get("code", [""])[0]
+        state = query.get("state", [""])[0]
+        error = query.get("error", [""])[0]
+        header = self.headers.get("Cookie", "")
+        jar = cookies.SimpleCookie(header)
+        expected_state = jar.get(OAUTH_STATE_COOKIE_NAME).value if jar.get(OAUTH_STATE_COOKIE_NAME) else ""
+        if error:
+            self.redirect("/login", f"Google sign-in failed: {error}", extra_cookies=[clear_oauth_state_cookie()])
+            return
+        if not code or not state or not expected_state or not hmac.compare_digest(state, expected_state):
+            self.redirect("/login", "Google sign-in state was invalid.", extra_cookies=[clear_oauth_state_cookie()])
+            return
+        try:
+            userinfo = self.fetch_google_userinfo(code)
+            user_id = self.find_or_create_google_user(userinfo)
+        except Exception:
+            self.redirect("/login", "Google sign-in could not be completed.", extra_cookies=[clear_oauth_state_cookie()])
+            return
+        token = self.create_session(user_id)
+        self.redirect(
+            "/my",
+            "Logged in with Google.",
+            extra_cookies=[session_cookie(token), clear_oauth_state_cookie()],
+        )
+
+    def fetch_google_userinfo(self, code):
+        token_body = urlencode(
+            {
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": self.google_redirect_uri(),
+                "grant_type": "authorization_code",
+            }
+        ).encode("utf-8")
+        token_request = Request(
+            GOOGLE_TOKEN_URL,
+            data=token_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            method="POST",
+        )
+        with urlopen(token_request, timeout=10) as response:
+            token_payload = json.loads(response.read().decode("utf-8"))
+        access_token = token_payload.get("access_token")
+        if not access_token:
+            raise ValueError("missing access token")
+        user_request = Request(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        )
+        with urlopen(user_request, timeout=10) as response:
+            userinfo = json.loads(response.read().decode("utf-8"))
+        if not userinfo.get("sub") or not userinfo.get("email") or not userinfo.get("email_verified"):
+            raise ValueError("unverified google account")
+        return userinfo
+
+    def find_or_create_google_user(self, userinfo):
+        google_sub = userinfo["sub"]
+        email = userinfo["email"].lower()
+        now = int(time.time())
+        with get_db() as db:
+            user = db.execute("SELECT id FROM users WHERE google_sub = ?", (google_sub,)).fetchone()
+            if user:
+                db.execute("UPDATE users SET email = ? WHERE id = ?", (email, user["id"]))
+                return user["id"]
+            username = self.username_from_email(email)
+            cursor = db.execute(
+                """
+                INSERT INTO users (username, password_hash, email, google_sub, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (username, hash_secret(secrets.token_urlsafe(32)), email, google_sub, now),
+            )
+            return cursor.lastrowid
 
     def signup(self):
         form = self.read_form() or {}

@@ -9,6 +9,9 @@ services:
       APP_NAME: ${APP_NAME:-Hostbin}
       BASE_URL: ${BASE_URL:-http://localhost:8080}
       MAX_PASTE_BYTES: ${MAX_PASTE_BYTES:-1048576}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
     volumes:
       - hostbin-data:/data
 

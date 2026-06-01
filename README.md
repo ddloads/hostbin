@@ -38,6 +38,19 @@ Set these environment variables in `docker-compose.yml` or your hosting provider
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8080` | Port inside the container |
 | `MAX_PASTE_BYTES` | `1048576` | Maximum paste body size |
+| `GOOGLE_CLIENT_ID` | empty | Optional Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | empty | Optional Google OAuth client secret |
+| `GOOGLE_REDIRECT_URI` | empty | Optional OAuth callback URL, defaults to `BASE_URL/auth/google/callback` |
+
+## Google Sign-In
+
+To enable Google sign-in, create a Google OAuth web client and add this authorized redirect URI:
+
+```text
+https://your-hostname.example/auth/google/callback
+```
+
+Then set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and either `BASE_URL` or `GOOGLE_REDIRECT_URI` in Portainer. The Google button appears only when both client credentials are configured.
 
 ## Deploy Notes
 
