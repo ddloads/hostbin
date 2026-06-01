@@ -457,9 +457,22 @@ def google_enabled():
     return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
 
-def layout(title, content, flash=None, user=None):
+def render_breadcrumbs(crumbs):
+    if not crumbs:
+        return ""
+    items = []
+    for label, href in crumbs:
+        if href:
+            items.append(f'<a href="{escape(href)}">{escape(label)}</a>')
+        else:
+            items.append(f'<span aria-current="page">{escape(label)}</span>')
+    return f'<nav class="breadcrumbs" aria-label="Breadcrumb">{"".join(items)}</nav>'
+
+
+def layout(title, content, flash=None, user=None, crumbs=None):
     safe_title = escape(f"{title} - {APP_NAME}" if title else APP_NAME)
     flash_html = f'<div class="flash">{escape(flash)}</div>' if flash else ""
+    breadcrumb_html = render_breadcrumbs(crumbs)
     account_links = (
         f'<a href="/my">My pastes</a><span class="nav-user">{escape(user["username"])}</span><a href="/logout">Log out</a>'
         if user
@@ -485,6 +498,7 @@ def layout(title, content, flash=None, user=None):
     </nav>
   </header>
   <main>
+    {breadcrumb_html}
     {flash_html}
     {content}
   </main>
@@ -648,6 +662,23 @@ main {
   width: min(1120px, calc(100% - 32px));
   margin: 28px auto 48px;
 }
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+.breadcrumbs a { color: var(--muted); }
+.breadcrumbs a:hover { color: var(--accent); }
+.breadcrumbs a::after {
+  content: "/";
+  color: var(--line);
+  margin-left: 8px;
+}
+.breadcrumbs span { color: var(--ink); font-weight: 700; }
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
@@ -948,9 +979,9 @@ class Handler(BaseHTTPRequestHandler):
             db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
         return row
 
-    def send_html(self, title, content, status=200, flash=None, headers=None, extra_cookies=None):
+    def send_html(self, title, content, status=200, flash=None, headers=None, extra_cookies=None, crumbs=None):
         user = self.current_user()
-        body = layout(title, content, flash if flash is not None else self.get_flash(), user=user).encode("utf-8")
+        body = layout(title, content, flash if flash is not None else self.get_flash(), user=user, crumbs=crumbs).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1024,7 +1055,7 @@ class Handler(BaseHTTPRequestHandler):
 </section>
 {self.recent_public(limit=8)}
 """
-        self.send_html("", content)
+        self.send_html("", content, crumbs=[("Home", None)])
 
     def account_form(self, mode, error=None, values=None):
         values = values or {}
@@ -1066,7 +1097,7 @@ class Handler(BaseHTTPRequestHandler):
   </div>
 </section>
 """
-        self.send_html(title, content, status=400 if error else 200)
+        self.send_html(title, content, status=400 if error else 200, crumbs=[("Home", "/"), (title, None)])
 
     def signup_form(self, error=None, values=None):
         self.account_form("signup", error, values)
@@ -1365,7 +1396,8 @@ class Handler(BaseHTTPRequestHandler):
   </div>
 </form>
 """
-        self.send_html(title, content)
+        crumbs = [("Home", "/"), ("New paste", None)] if show_password else [("Home", "/"), ("My pastes", "/my"), ("Edit paste", None)]
+        self.send_html(title, content, crumbs=crumbs)
 
     def paste_to_form_values(self, paste):
         expires_key = "never"
@@ -1523,7 +1555,7 @@ class Handler(BaseHTTPRequestHandler):
   </form>
 </section>
 """
-        self.send_html("Protected paste", content, status=403 if error else 200, flash="")
+        self.send_html("Protected paste", content, status=403 if error else 200, flash="", crumbs=[("Home", "/"), ("Protected paste", None)])
 
     def view_paste(self, paste_id, posted=False):
         paste = self.load_paste(paste_id)
@@ -1554,6 +1586,14 @@ class Handler(BaseHTTPRequestHandler):
         raw_path = f"/raw/{quote(paste_id)}"
         copy_raw_url = escape(raw_url(paste_id))
         download_path = f"/download/{quote(paste_id)}"
+        crumbs = [("Home", "/")]
+        if owns_paste:
+            crumbs.append(("My pastes", "/my"))
+            if folder:
+                crumbs.append((folder, f"/my?folder={quote(folder)}"))
+        elif paste["visibility"] == "public":
+            crumbs.append(("Public", "/public"))
+        crumbs.append((paste["title"], None))
         content = f"""
 <section class="paste-head">
   <div>
@@ -1579,7 +1619,7 @@ class Handler(BaseHTTPRequestHandler):
 </section>
 <div class="codebox"><pre>{body}</pre></div>
 """
-        self.send_html(paste["title"], content)
+        self.send_html(paste["title"], content, crumbs=crumbs)
         if paste["burn_after_read"]:
             with get_db() as db:
                 db.execute("DELETE FROM pastes WHERE id = ?", (paste_id,))
@@ -1672,7 +1712,7 @@ class Handler(BaseHTTPRequestHandler):
         return f'<section><h2>Recent public pastes</h2><div class="paste-list">{"".join(items)}</div></section>'
 
     def public_list(self):
-        self.send_html("Public pastes", f"<h1>Public pastes</h1>{self.recent_public(limit=50)}")
+        self.send_html("Public pastes", f"<h1>Public pastes</h1>{self.recent_public(limit=50)}", crumbs=[("Home", "/"), ("Public", None)])
 
     def my_pastes(self):
         user = self.current_user()
@@ -1759,13 +1799,18 @@ class Handler(BaseHTTPRequestHandler):
 {folder_nav}
 {listing}
 """
-        self.send_html("My pastes", content)
+        crumbs = [("Home", "/"), ("My pastes", "/my")]
+        if selected_folder:
+            crumbs.append((selected_folder, None))
+        else:
+            crumbs[-1] = ("My pastes", None)
+        self.send_html("My pastes", content, crumbs=crumbs)
 
     def not_found(self, text=False):
         if text:
             self.send_text("Not found\n", status=404)
             return
-        self.send_html("Not found", '<section class="panel empty">Paste not found.</section>', status=404, flash="")
+        self.send_html("Not found", '<section class="panel empty">Paste not found.</section>', status=404, flash="", crumbs=[("Home", "/"), ("Not found", None)])
 
 
 if __name__ == "__main__":
