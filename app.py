@@ -62,6 +62,18 @@ LANGUAGES = [
     "YAML",
 ]
 
+CATEGORIES = [
+    "None",
+    "Code",
+    "Config",
+    "Documentation",
+    "Logs",
+    "Notes",
+    "Snippet",
+    "SQL",
+    "Troubleshooting",
+]
+
 STORED_LANGUAGES = [lang for lang in LANGUAGES if lang != "Auto Detect"]
 
 EXTENSION_LANGUAGES = {
@@ -166,6 +178,10 @@ def init_db():
         columns = {row[1] for row in db.execute("PRAGMA table_info(pastes)").fetchall()}
         if "owner_user_id" not in columns:
             db.execute("ALTER TABLE pastes ADD COLUMN owner_user_id INTEGER")
+        if "category" not in columns:
+            db.execute("ALTER TABLE pastes ADD COLUMN category TEXT NOT NULL DEFAULT 'None'")
+        if "folder" not in columns:
+            db.execute("ALTER TABLE pastes ADD COLUMN folder TEXT NOT NULL DEFAULT ''")
         user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
         if "email" not in user_columns:
             db.execute("ALTER TABLE users ADD COLUMN email TEXT")
@@ -174,6 +190,8 @@ def init_db():
         db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_created ON pastes(created_at DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_expires ON pastes(expires_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_owner ON pastes(owner_user_id, created_at DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_owner_folder ON pastes(owner_user_id, folder, created_at DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pastes_category ON pastes(category)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
@@ -276,6 +294,17 @@ def detect_language(body, filename=None, selected=None):
     if sample.startswith("#!") or re.search(r"\b(echo|fi|done|elif)\b", sample):
         return "Bash"
     return "Plain Text"
+
+
+def clean_category(category):
+    category = (category or "None").strip()
+    return category if category in CATEGORIES else "None"
+
+
+def clean_folder(folder):
+    folder = (folder or "").strip().replace("/", "-").replace("\\", "-")
+    folder = re.sub(r"\s+", " ", folder)
+    return folder[:80]
 
 
 def line_comment_marker(language):
@@ -1136,6 +1165,10 @@ class Handler(BaseHTTPRequestHandler):
             f'<option value="{escape(lang)}" {"selected" if values.get("language") == lang else ""}>{escape(lang)}</option>'
             for lang in LANGUAGES
         )
+        category_options = "".join(
+            f'<option value="{escape(category)}" {"selected" if values.get("category", "None") == category else ""}>{escape(category)}</option>'
+            for category in CATEGORIES
+        )
         exp_options = "".join(
             f'<option value="{key}" {"selected" if values.get("expires") == key else ""}>{label}</option>'
             for key, label in [
@@ -1187,6 +1220,12 @@ class Handler(BaseHTTPRequestHandler):
     <label>Language
       <select name="language">{lang_options}</select>
     </label>
+    <label>Category
+      <select name="category">{category_options}</select>
+    </label>
+    <label>Folder
+      <input name="folder" maxlength="80" value="{escape(values.get("folder", ""))}" placeholder="Optional folder">
+    </label>
     <label>Visibility
       <select name="visibility">
         <option value="unlisted" {"selected" if values.get("visibility") != "public" else ""}>Unlisted</option>
@@ -1226,6 +1265,8 @@ class Handler(BaseHTTPRequestHandler):
             "language": paste["language"],
             "visibility": paste["visibility"],
             "expires": expires_key,
+            "category": paste["category"] if "category" in paste.keys() else "None",
+            "folder": paste["folder"] if "folder" in paste.keys() else "",
         }
 
     def create_paste(self):
@@ -1249,6 +1290,8 @@ class Handler(BaseHTTPRequestHandler):
         default_title = form.get("uploaded_filename") or "Untitled paste"
         title = (form.get("title") or default_title).strip()[:120]
         language = detect_language(body, form.get("uploaded_filename"), form.get("language"))
+        category = clean_category(form.get("category"))
+        folder = clean_folder(form.get("folder"))
         visibility = "public" if form.get("visibility") == "public" else "unlisted"
         password = form.get("password", "")
         user = self.current_user()
@@ -1257,8 +1300,9 @@ class Handler(BaseHTTPRequestHandler):
                 """
                 INSERT INTO pastes (
                     id, title, body, language, visibility, burn_after_read,
-                    password_hash, delete_token_hash, views, created_at, expires_at, owner_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    password_hash, delete_token_hash, views, created_at, expires_at,
+                    owner_user_id, category, folder
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     paste_id,
@@ -1272,6 +1316,8 @@ class Handler(BaseHTTPRequestHandler):
                     now,
                     expires_at,
                     user["id"] if user else None,
+                    category,
+                    folder,
                 ),
             )
         self.redirect(
@@ -1326,15 +1372,17 @@ class Handler(BaseHTTPRequestHandler):
         default_title = form.get("uploaded_filename") or "Untitled paste"
         title = (form.get("title") or default_title).strip()[:120]
         language = detect_language(body, form.get("uploaded_filename"), form.get("language"))
+        category = clean_category(form.get("category"))
+        folder = clean_folder(form.get("folder"))
         visibility = "public" if form.get("visibility") == "public" else "unlisted"
         with get_db() as db:
             db.execute(
                 """
                 UPDATE pastes
-                SET title = ?, body = ?, language = ?, visibility = ?, expires_at = ?
+                SET title = ?, body = ?, language = ?, visibility = ?, expires_at = ?, category = ?, folder = ?
                 WHERE id = ?
                 """,
-                (title, body, language, visibility, expires_at, paste_id),
+                (title, body, language, visibility, expires_at, category, folder, paste_id),
             )
         self.redirect(f"/p/{quote(paste_id)}", "Paste updated.")
 
@@ -1376,6 +1424,10 @@ class Handler(BaseHTTPRequestHandler):
         elif owns_paste:
             delete_link = f'<a class="button secondary" href="/delete/{quote(paste_id)}?owner=1">Delete</a>'
         edit_link = f'<a class="button secondary" href="/edit/{quote(paste_id)}">Edit</a>' if owns_paste else ""
+        category = paste["category"] if "category" in paste.keys() else "None"
+        folder = paste["folder"] if "folder" in paste.keys() else ""
+        category_meta = f'<span>{escape(category)}</span>' if category and category != "None" else ""
+        folder_meta = f'<span>folder: {escape(folder)}</span>' if folder else ""
         body = highlight_code(paste["body"], paste["language"])
         raw_path = f"/raw/{quote(paste_id)}"
         content = f"""
@@ -1384,6 +1436,8 @@ class Handler(BaseHTTPRequestHandler):
     <h1>{escape(paste["title"])}</h1>
     <div class="meta">
       <span class="badge">{escape(paste["language"])}</span>
+      {category_meta}
+      {folder_meta}
       <span>{escape(paste["visibility"])}</span>
       <span>{age(paste["created_at"])}</span>
       <span>{paste["views"] + 1} views</span>
@@ -1437,7 +1491,7 @@ class Handler(BaseHTTPRequestHandler):
         with get_db() as db:
             rows = db.execute(
                 """
-                SELECT pastes.id, pastes.title, pastes.language, pastes.views,
+                SELECT pastes.id, pastes.title, pastes.language, pastes.category, pastes.views,
                        pastes.created_at, pastes.expires_at, users.username
                 FROM pastes
                 LEFT JOIN users ON users.id = pastes.owner_user_id
@@ -1458,6 +1512,7 @@ class Handler(BaseHTTPRequestHandler):
     <h3><a href="/p/{quote(row["id"])}">{escape(row["title"])}</a></h3>
     <div class="meta">
       <span class="badge">{escape(row["language"])}</span>
+      {f'<span>{escape(row["category"])}</span>' if row["category"] and row["category"] != "None" else ""}
       <span>{escape(row["username"]) if row["username"] else "anonymous"}</span>
       <span>{age(row["created_at"])}</span>
       <span>{row["views"]} views</span>
@@ -1478,22 +1533,49 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect("/login", "Log in to see your pastes.")
             return
         now = int(time.time())
+        selected_folder = clean_folder(parse_qs(urlparse(self.path).query).get("folder", [""])[0])
         with get_db() as db:
-            rows = db.execute(
+            folders = db.execute(
                 """
-                SELECT id, title, language, visibility, views, created_at, expires_at
+                SELECT folder, COUNT(*) AS count
                 FROM pastes
-                WHERE owner_user_id = ? AND (expires_at IS NULL OR expires_at > ?)
-                ORDER BY created_at DESC
-                LIMIT 100
+                WHERE owner_user_id = ? AND folder != '' AND (expires_at IS NULL OR expires_at > ?)
+                GROUP BY folder
+                ORDER BY lower(folder)
                 """,
                 (user["id"], now),
             ).fetchall()
+            params = [user["id"], now]
+            folder_filter = ""
+            if selected_folder:
+                folder_filter = "AND folder = ?"
+                params.append(selected_folder)
+            rows = db.execute(
+                f"""
+                SELECT id, title, language, category, folder, visibility, views, created_at, expires_at
+                FROM pastes
+                WHERE owner_user_id = ? AND (expires_at IS NULL OR expires_at > ?)
+                {folder_filter}
+                ORDER BY created_at DESC
+                LIMIT 100
+                """,
+                params,
+            ).fetchall()
+        folder_links = ['<a class="button secondary" href="/my">All pastes</a>']
+        for folder_row in folders:
+            label = f'{folder_row["folder"]} ({folder_row["count"]})'
+            class_name = "button" if selected_folder == folder_row["folder"] else "button secondary"
+            folder_links.append(
+                f'<a class="{class_name}" href="/my?folder={quote(folder_row["folder"])}">{escape(label)}</a>'
+            )
+        folder_nav = f'<section class="panel folder-nav"><h2>Folders</h2><div class="actions">{"".join(folder_links)}</div></section>' if folders else ""
         if not rows:
-            listing = '<section class="panel empty">You have not created any pastes yet.</section>'
+            listing = '<section class="panel empty">No pastes found in this folder.</section>' if selected_folder else '<section class="panel empty">You have not created any pastes yet.</section>'
         else:
             items = []
             for row in rows:
+                category_meta = f'<span>{escape(row["category"])}</span>' if row["category"] and row["category"] != "None" else ""
+                folder_meta = f'<span>folder: {escape(row["folder"])}</span>' if row["folder"] else ""
                 items.append(
                     f"""
 <article class="paste-row">
@@ -1501,6 +1583,8 @@ class Handler(BaseHTTPRequestHandler):
     <h3><a href="/p/{quote(row["id"])}">{escape(row["title"])}</a></h3>
     <div class="meta">
       <span class="badge">{escape(row["language"])}</span>
+      {category_meta}
+      {folder_meta}
       <span>{escape(row["visibility"])}</span>
       <span>{age(row["created_at"])}</span>
       <span>{row["views"]} views</span>
@@ -1518,11 +1602,12 @@ class Handler(BaseHTTPRequestHandler):
         content = f"""
 <section class="paste-head">
   <div>
-    <h1>My pastes</h1>
+    <h1>{f'Folder: {escape(selected_folder)}' if selected_folder else 'My pastes'}</h1>
     <p>Signed in as {escape(user["username"])}.</p>
   </div>
   <div class="actions"><a class="button" href="/new">Create paste</a></div>
 </section>
+{folder_nav}
 {listing}
 """
         self.send_html("My pastes", content)
